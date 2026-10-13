@@ -1,0 +1,25 @@
+{
+  "runtime": [
+    "LICENSE",
+    "NOTICE.md",
+    "services/helper/src/index.mjs",
+    "services/helper/src/helper-updates.mjs",
+    "services/helper/src/learner-client.mjs",
+    "services/helper/src/single-flight.mjs",
+    "services/wiki-site/public/skillforge-theme.css",
+    "shared/node/src/repo-paths.mjs",
+    "shared/node/src/lab-discovery.mjs",
+    "shared/node/src/product.mjs",
+    "shared/product.json",
+    "scripts/lab-helper.sh",
+    "scripts/self-assess.sh"
+  ],
+  "generated": [
+    "package.json",
+    "README.md",
+    "helper-build.json",
+    "labs/README.txt",
+    "shared/learner-config.json",
+    "services/wiki-site/public/skillforge-manifest.json"
+  ]
+}

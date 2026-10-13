@@ -1,0 +1,343 @@
+name: Public SkillForge base container
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      context_tag:
+        description: "Reviewed container-base-source/vMAJOR.MINOR.PATCH release"
+        required: true
+        type: string
+      bootstrap_namespace:
+        description: "Create the initial GHCR namespace; NOT a public-release success"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-base-${{ inputs.context_tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      enabled: ${{ steps.route.outputs.enabled }}
+      tag: ${{ steps.route.outputs.tag }}
+      version: ${{ steps.route.outputs.version }}
+      bootstrap: ${{ steps.route.outputs.bootstrap }}
+      complete: ${{ steps.existing.outputs.complete }}
+    steps:
+      - name: Route only an explicitly approved base release
+        id: route
+        env:
+          ENABLED: ${{ vars.SKILLFORGE_PUBLIC_BASE_ENABLED }}
+          CONTEXT_TAG: ${{ inputs.context_tag || github.event.release.tag_name }}
+          BOOTSTRAP: ${{ github.event_name == 'workflow_dispatch' && inputs.bootstrap_namespace }}
+          IS_MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          set -euo pipefail
+          if [[ "$ENABLED" != true ]]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Public container delivery: Not Assessed (not enabled)." >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$CONTEXT_TAG" =~ ^container-base-source/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            printf 'enabled=true\ntag=%s\nversion=%s\nbootstrap=%s\n' \
+              "$CONTEXT_TAG" "${CONTEXT_TAG#container-base-source/v}" "$BOOTSTRAP" >> "$GITHUB_OUTPUT"
+          elif [[ "$IS_MANUAL" == true ]]; then
+            echo "::error::Select a stable reviewed container-base-source tag"; exit 1
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Base container publication: Not Assessed (different release component)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        if: steps.route.outputs.enabled == 'true'
+        with:
+          ref: ${{ steps.route.outputs.tag }}
+          persist-credentials: false
+      - name: Verify public source assets and existing immutable release
+        id: existing
+        if: steps.route.outputs.enabled == 'true'
+        env:
+          CONTEXT_TAG: ${{ steps.route.outputs.tag }}
+          BOOTSTRAP: ${{ steps.route.outputs.bootstrap }}
+        run: |
+          set -euo pipefail
+          python3 scripts/container_release.py download --tag "$CONTEXT_TAG" --directory "$RUNNER_TEMP/base-assets"
+          if [[ "$BOOTSTRAP" == true ]]; then
+            echo "complete=false" >> "$GITHUB_OUTPUT"
+          else
+            python3 scripts/container_release.py existing --directory "$RUNNER_TEMP/base-assets" > "$RUNNER_TEMP/existing.json"
+            complete="$(jq -er '.published | tostring' "$RUNNER_TEMP/existing.json")"
+            printf 'complete=%s\n' "$complete" >> "$GITHUB_OUTPUT"
+            if [[ "$complete" == true ]]; then
+              echo "Existing immutable base release and anonymous index access verified; no image tags changed." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.enabled == 'true' && needs.prepare.outputs.complete != 'true'
+    environment: public-container-publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            architecture: amd64
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+      - name: Require independent approval and correct package visibility
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOOTSTRAP: ${{ needs.prepare.outputs.bootstrap }}
+        run: |
+          set -euo pipefail
+          python3 scripts/container_release.py approval
+          args=()
+          if [[ "$BOOTSTRAP" == true ]]; then args+=(--bootstrap); fi
+          python3 scripts/container_release.py visibility "${args[@]}"
+      - name: Download and validate the exact public-only context
+        env:
+          CONTEXT_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 scripts/container_release.py download --tag "$CONTEXT_TAG" \
+            --directory "$RUNNER_TEMP/base-assets" --extract "$RUNNER_TEMP/base-context"
+      - name: Build and smoke-test the native generic base
+        id: image
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          repository="ghcr.io/blackoutsecure/bos-skillforge-release/base-ubuntu"
+          image="$repository:candidate-v$RELEASE_VERSION-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$ARCHITECTURE"
+          source_sha="$(jq -er '.source.commit' "$RUNNER_TEMP/base-assets/release.json")"
+          context_sha="$(jq -er '.artifact.sha256' "$RUNNER_TEMP/base-assets/release.json")"
+          docker build --pull --platform "linux/$ARCHITECTURE" --tag "$image" \
+            --label "org.opencontainers.image.source=https://github.com/blackoutsecure/bos-skillforge-release" \
+            --label "org.opencontainers.image.version=$RELEASE_VERSION" \
+            --label "org.opencontainers.image.revision=$source_sha" \
+            --label "org.opencontainers.image.licenses=NOASSERTION" \
+            --label "org.opencontainers.image.ref.name=$repository" \
+            --label "com.blackoutsecure.source.context.sha256=$context_sha" "$RUNNER_TEMP/base-context"
+          docker inspect "$image" --format '{{json .Config.Labels}}' > "$RUNNER_TEMP/labels.json"
+          jq -e --arg version "$RELEASE_VERSION" --arg source "$source_sha" --arg context "$context_sha" \
+            '.["org.opencontainers.image.source"] == "https://github.com/blackoutsecure/bos-skillforge-release"
+             and .["org.opencontainers.image.version"] == $version
+             and .["org.opencontainers.image.revision"] == $source
+             and .["org.opencontainers.image.licenses"] == "NOASSERTION"
+             and .["com.blackoutsecure.source.context.sha256"] == $context' "$RUNNER_TEMP/labels.json"
+          docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true \
+            --read-only --tmpfs /tmp:rw,nosuid,nodev "$image" bash -c '
+              set -euo pipefail
+              test -x /usr/local/bin/skillforge-assess
+              skillforge-assess --help
+              test -f /usr/share/doc/skillforge/LICENSE
+              test -f /usr/share/doc/skillforge/NOTICE.md
+              test ! -e /opt/skillforge/labs
+              test ! -e /workspace/INSTRUCTOR-GUIDE.md
+            '
+          printf 'repository=%s\nimage=%s\n' "$repository" "$image" >> "$GITHUB_OUTPUT"
+      - name: Scan the image that will be pushed and retain its SBOM
+        run: |
+          set -euo pipefail
+          mkdir -- "$RUNNER_TEMP/base-scan"
+          docker save "$IMAGE" --output "$RUNNER_TEMP/base-scan/image.tar"
+          scanner="aquasec/trivy@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c"
+          docker run --rm --volume "$RUNNER_TEMP/base-scan:/scan:ro" "$scanner" image \
+            --input /scan/image.tar --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1
+          docker run --rm --volume "$RUNNER_TEMP/base-scan:/scan:ro" "$scanner" image \
+            --input /scan/image.tar --format cyclonedx > "$RUNNER_TEMP/sbom.cdx.json"
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+      - name: Authenticate only to this public repository's GHCR packages
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Push the scanned platform without rebuilding
+        id: push
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          REPOSITORY: ${{ steps.image.outputs.repository }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE"
+          docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' > "$RUNNER_TEMP/platform-manifest.json"
+          digest="$(jq -er '.digest | select(test("^sha256:[a-f0-9]{64}$"))' "$RUNNER_TEMP/platform-manifest.json")"
+          jq -n --arg architecture "$ARCHITECTURE" --arg repository "$REPOSITORY" --arg digest "$digest" \
+            --arg source "$(jq -er '.source.commit' "$RUNNER_TEMP/base-assets/release.json")" \
+            --arg context "$(jq -er '.artifact.sha256' "$RUNNER_TEMP/base-assets/release.json")" \
+            --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            '{architecture:$architecture,repository:$repository,digest:$digest,sourceSha:$source,
+              contextSha256:$context,runId:$run,runAttempt:$attempt,scan:"passed"}' > "$RUNNER_TEMP/platform.json"
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+      - name: Attest the scanned platform
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+      - name: Attest the platform SBOM
+        id: sbom
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-name: ${{ steps.image.outputs.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/sbom.cdx.json
+          push-to-registry: true
+      - name: Stage the platform result at fixed paths
+        env:
+          PROVENANCE: ${{ steps.provenance.outputs.bundle-path }}
+          SBOM: ${{ steps.sbom.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/base-result"
+          mkdir -- "$output"
+          cp -- "$RUNNER_TEMP/platform.json" "$output/platform.json"
+          cp -- "$RUNNER_TEMP/sbom.cdx.json" "$output/sbom.cdx.json"
+          cp -- "$PROVENANCE" "$output/provenance.sigstore.json"
+          cp -- "$SBOM" "$output/sbom.sigstore.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: container-base-platform-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/base-result
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.enabled == 'true' && needs.prepare.outputs.complete != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: public-container-publish
+    permissions:
+      contents: write
+      actions: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: container-base-platform-*
+          path: ${{ runner.temp }}/platforms
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+      - name: Recheck independent approval and package visibility
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOOTSTRAP: ${{ needs.prepare.outputs.bootstrap }}
+        run: |
+          set -euo pipefail
+          python3 scripts/container_release.py approval
+          args=()
+          if [[ "$BOOTSTRAP" == true ]]; then args+=(--bootstrap); fi
+          python3 scripts/container_release.py visibility "${args[@]}"
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Assemble only the tested native platform digests
+        id: index
+        env:
+          CONTEXT_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          BOOTSTRAP: ${{ needs.prepare.outputs.bootstrap }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/container_release.py download --tag "$CONTEXT_TAG" --directory "$RUNNER_TEMP/base-assets"
+          repository="ghcr.io/blackoutsecure/bos-skillforge-release/base-ubuntu"
+          tag="v$RELEASE_VERSION"
+          if [[ "$BOOTSTRAP" == true ]]; then
+            tag="bootstrap-v$RELEASE_VERSION-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          else
+            python3 scripts/container_release.py unused-tag --version "$RELEASE_VERSION"
+            refs="$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/container-base%2Fv$RELEASE_VERSION")"
+            jq -e 'length == 0' <<< "$refs"
+          fi
+          images=()
+          for architecture in amd64 arm64; do
+            record="$RUNNER_TEMP/platforms/container-base-platform-$architecture/platform.json"
+            digest="$(jq -er --arg architecture "$architecture" --arg repository "$repository" \
+              --arg source "$(jq -er '.source.commit' "$RUNNER_TEMP/base-assets/release.json")" \
+              --arg context "$(jq -er '.artifact.sha256' "$RUNNER_TEMP/base-assets/release.json")" \
+              --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+              'select(.architecture == $architecture and .repository == $repository and .sourceSha == $source
+                and .contextSha256 == $context and .runId == $run and .runAttempt == $attempt and .scan == "passed")
+                | .digest | select(test("^sha256:[a-f0-9]{64}$"))' "$record")"
+            images+=("$repository@$digest")
+          done
+          docker buildx imagetools create --tag "$repository:$tag" "${images[@]}"
+          docker buildx imagetools inspect "$repository:$tag" --format '{{json .Manifest}}' > "$RUNNER_TEMP/index.json"
+          digest="$(jq -er '.digest | select(test("^sha256:[a-f0-9]{64}$"))' "$RUNNER_TEMP/index.json")"
+          printf 'digest=%s\nrepository=%s\n' "$digest" "$repository" >> "$GITHUB_OUTPUT"
+          if [[ "$BOOTSTRAP" == true ]]; then
+            echo "Public image availability: Not Assessed. Namespace bootstrapped; set its package visibility to PUBLIC and rerun without bootstrap. No public image release record was created." >> "$GITHUB_STEP_SUMMARY"
+          else
+            python3 scripts/container_release.py verify-image --digest "$digest"
+            anonymous="$RUNNER_TEMP/anonymous-docker"
+            mkdir -- "$anonymous"
+            for architecture in amd64 arm64; do
+              docker --config "$anonymous" pull --platform "linux/$architecture" "$repository@$digest"
+            done
+            python3 scripts/container_release.py stage-image --directory "$RUNNER_TEMP/base-assets" \
+              --platforms "$RUNNER_TEMP/platforms" --digest "$digest" \
+              --policy-sha "$(git rev-parse HEAD)" --output "$RUNNER_TEMP/container-release"
+          fi
+      - name: Attest the final public multiarchitecture index
+        id: provenance
+        if: needs.prepare.outputs.bootstrap != 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.index.outputs.repository }}
+          subject-digest: ${{ steps.index.outputs.digest }}
+          push-to-registry: true
+      - name: Publish durable public image metadata, SBOMs and provenance
+        if: needs.prepare.outputs.bootstrap != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          PROVENANCE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/container-release"
+          cp -- "$PROVENANCE" "$output/index-provenance.sigstore.json"
+          tag="container-base/v$RELEASE_VERSION"
+          python3 scripts/container_release.py seal-image --tag "$tag" --directory "$output"
+          assets=("$output/"*)
+          gh release create "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --target "$(git rev-parse HEAD)" \
+            --draft --latest=false --title "SkillForge public Ubuntu base $RELEASE_VERSION" \
+            --notes "Public amd64/arm64 generic base only. Pull the digest in container.json. Course images and instructor content are not included; individual bundled software licenses remain in effect."
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
+          python3 scripts/container_release.py verify-image-release --tag "$tag"
+          printf 'Public base image and anonymous multiarchitecture pulls: PASS\n\n%s@%s\n' \
+            "$(jq -er '.image.repository' "$output/container.json")" \
+            "$(jq -er '.image.digest' "$output/container.json")" >> "$GITHUB_STEP_SUMMARY"

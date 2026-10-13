@@ -1,0 +1,28 @@
+Blackout Secure Proprietary License
+
+Copyright (c) 2026 Blackout Secure. All rights reserved.
+
+This repository, including its source code, documentation, content, configuration, and related
+materials (collectively, the "Software"), is proprietary and confidential to Blackout Secure.
+
+No permission is granted to use, copy, modify, merge, publish, distribute, sublicense, sell, lease,
+transfer, or create derivative works of the Software, in whole or in part, except as expressly
+authorized in a separate written agreement signed by Blackout Secure.
+
+You may view the Software solely for evaluation purposes where it is made publicly accessible. You
+may not use the Software in production, provide it to a third party, remove proprietary notices, or
+represent that you have rights in the Software without Blackout Secure's prior written permission.
+
+The Blackout Secure name, logo, and other brand assets included in this repository are trademarks of
+Blackout Secure and are not licensed for use by any other party.
+
+Third-party components remain under their own licenses. Where this repository bundles, vendors, or
+loads a third-party component, that component's license governs it and must be recorded in the
+repository's `NOTICE` or `NOTICE.md`.
+
+The Software is provided "AS IS" without warranties of any kind, whether express, implied, or
+statutory, including warranties of merchantability, fitness for a particular purpose, title, and
+non-infringement. To the maximum extent permitted by law, Blackout Secure will not be liable for any
+claim, damages, or other liability arising from or related to the Software or its use.
+
+Contact Blackout Secure through https://blackoutsecure.app for licensing, permissions, or support.

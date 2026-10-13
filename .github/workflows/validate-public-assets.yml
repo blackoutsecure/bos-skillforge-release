@@ -1,0 +1,45 @@
+name: Public download validation
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Published helper, container-base-source or container-base component tag"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  anonymous-download:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+          persist-credentials: false
+      - name: Verify actual anonymous downloads and exact public-only package contents
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          case "$RELEASE_TAG" in
+            learner-helper/v*)
+              python3 scripts/validate_public_release.py --tag "$RELEASE_TAG"
+              ;;
+            container-base-source/v*)
+              python3 scripts/container_release.py download --tag "$RELEASE_TAG" \
+                --directory "$RUNNER_TEMP/container-source-assets"
+              ;;
+            container-base/v*)
+              python3 scripts/container_release.py verify-image-release --tag "$RELEASE_TAG"
+              ;;
+            *)
+              echo "::error::Release component has no approved public validation contract"; exit 1
+              ;;
+          esac
+          echo "Anonymous public component availability and asset integrity: PASS" >> "$GITHUB_STEP_SUMMARY"
