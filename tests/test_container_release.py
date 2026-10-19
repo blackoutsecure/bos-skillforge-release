@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -338,6 +339,22 @@ class ContainerReleaseTests(unittest.TestCase):
         self.assertIn("runner: ubuntu-24.04-arm", workflow)
         for reference in re.findall(r"uses: ([^\n]+)", workflow):
             self.assertRegex(reference, r"@[a-f0-9]{40} # v\d+\.\d+\.\d+")
+
+
+class ScriptEntryPointTests(unittest.TestCase):
+    def test_workflow_scripts_start_in_direct_script_mode(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        for script in ("container_release.py", "validate_public_release.py"):
+            with self.subTest(script=script):
+                result = subprocess.run(
+                    [sys.executable, str(root / "scripts" / script), "--help"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("usage:", result.stdout)
 
 
 if __name__ == "__main__":

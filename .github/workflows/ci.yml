@@ -22,5 +22,5 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s tests -v
-          python3 -m py_compile scripts/validate_public_release.py
+          python3 -m py_compile scripts/validate_public_release.py scripts/container_release.py
           git diff --check

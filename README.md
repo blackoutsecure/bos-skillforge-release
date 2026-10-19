@@ -103,7 +103,7 @@ Python 3.12+ and its standard library are sufficient:
 python -m unittest discover -s tests -v
 python scripts\validate_public_release.py --tag learner-helper/v1.0.2 --directory <assets-directory>
 python scripts\validate_public_release.py --tag learner-helper/v1.0.2
-actionlint .github\workflows\ci.yml .github\workflows\validate-public-assets.yml
+actionlint .github\workflows\ci.yml .github\workflows\publish-public-containers.yml .github\workflows\validate-public-assets.yml
 ```
 
 The local command validates bytes and contracts. Only the command without `--directory` and the live
